@@ -1,163 +1,187 @@
 import torch
-import numpy as np
-import torch.nn as nn
 import itertools
+from torch import nn
 from torch.nn import functional as F
+
+# import project‑level helpers
 from model.util import Linear, make_subsequent_mask
 
 
 class Generator(nn.Module):
-    def __init__(self, d_model, vocab):
-        super(Generator, self).__init__()
-        self.proj = Linear(d_model, vocab, False)
+    """Projection + log‑softmax helper used by the decoder."""
 
-    def forward(self, x):
+    def __init__(self, d_model: int, vocab: int):
+        super().__init__()
+        self.proj = Linear(d_model, vocab, bias=False)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Return log‑probabilities over the vocabulary."""
         return F.log_softmax(self.proj(x), dim=-1)
 
-    def greedyscore(self, x):
+    # during search we sometimes need the raw scores
+    def greedyscore(self, x: torch.Tensor) -> torch.Tensor:
         return self.proj(x)
 
 
-class Beam(object):
-    def __init__(self, beam_size):
+class Beam:
+    """A minimal beam data‑structure holding partial hypotheses."""
+
+    def __init__(self, beam_size: int):
         self.beam_size = beam_size
+        self.candidates: list[list[int]] = []
+        self.scores: list[float] = []
 
-        self.candidates = []
-        self.scores = []
+    def step(self, log_prob: torch.Tensor, prev_beam: "Beam", is_done_fn):
+        """Advance the beam one time‑step.
 
-    def step(self, prob, prev_beam, f_done):
-        pre_score = prob.new_tensor(prev_beam.scores)
-        score = prob + pre_score.unsqueeze(-1).expand_as(prob)
-        nbest_score, nbest_ix = score.view(-1).topk(self.beam_size, largest=False)
-        beam_ix = nbest_ix / prob.size(1)
-        token_ix = nbest_ix - beam_ix * prob.size(1)
+        Args
+        ----
+        log_prob: (B, V) tensor with *negative* log‑probabilities for the next token.
+        prev_beam: beam at the previous step.
+        is_done_fn: lambda that returns True when a hypothesis is finished.
+        """
+        # Expand previous scores to match current vocab dim
+        prev_score = log_prob.new_tensor(prev_beam.scores)  # (B,)
+        total_score = log_prob + prev_score.unsqueeze(-1)    # broadcast to (B, V)
 
-        done_list, remain_list = [], []
-        prev_candidates = prev_beam.candidates
-        for b_score, b_ix, t_ix in itertools.zip_longest(nbest_score.tolist(), beam_ix.tolist(), token_ix.tolist()):
-            candidate = prev_candidates[b_ix] + [t_ix]
+        # Choose the best beam_size hypotheses over the flattened (B*V) space
+        best_score, best_ix = total_score.view(-1).topk(self.beam_size, largest=False)
+        beam_ix = torch.div(best_ix, log_prob.size(1), rounding_mode="floor")
+        token_ix = best_ix - beam_ix * log_prob.size(1)
 
-            if f_done(candidate):
-                done_list.append([candidate, b_score])
+        done, remain = [], []
+        for s, b, t in zip(best_score.tolist(), beam_ix.tolist(), token_ix.tolist()):
+            candidate = prev_beam.candidates[b] + [t]
+            if is_done_fn(candidate):
+                done.append((candidate, s))
             else:
-                remain_list.append(b_ix)
+                remain.append(b)
                 self.candidates.append(candidate)
-                self.scores.append(b_score)
-        return done_list, remain_list
+                self.scores.append(s)
+        return done, remain
 
 
-def greedy(args, model, src, src_mask, initid, eosid):
-    encodings = model.encode(src, src_mask)
-    # torch.set_printoptions(profile='short')
+# -----------------------------------------------------------------------------
+# Search helpers
+# -----------------------------------------------------------------------------
+
+def greedy(
+    args,
+    model,
+    src: torch.Tensor,
+    src_mask: torch.Tensor,
+    initid: int,
+    eosid: int,
+    *objs,
+):
+    """Greedy decoding that also works without multimodal inputs."""
+
+    # Encode source (optionally multimodal)
+    encodings = model.encode(src, src_mask, *objs) if objs else model.encode(src, src_mask)
+
+    # In case encode() returns (hx, ho)
+    if isinstance(encodings, tuple):
+        encodings = encodings[0]
 
     B, T, H = encodings.size()
+    max_len = int(T * args.length_ratio)
 
-    target_len = int(T * args.length_ratio)
+    outs = src.new_full((B, 1), initid)
+    finished = torch.zeros(B, dtype=torch.bool, device=src.device)
 
-    outs = torch.LongTensor(B, 1).fill_(initid).to(src.device)
-
-    # wordemb + hidden
-    # hiddens = [torch.Tensor(B, T, H).zero_() for _ in range(args.n_layers + 1)]
-
-    eos_yet = torch.zeros(B, device=src.device, dtype=torch.uint8)
-    for t in range(target_len):
-        # hiddens[0][:, t] = model.tgt_embed(outs[:, t])
-        # for l in range(args.n_layers):
-        #     y = hiddens[l][:, :t+1]
-        # B t+1 H
-        subseq_mask = make_subsequent_mask(outs.size(1))
-        subseq_mask = subseq_mask.to(src.device)
-
-        # print('causual')
-        # print(subseq_mask.detach())
-
-        y = model.decode(encodings, src_mask, outs, subseq_mask)
-        preds = model.generate(y[:, -1])
-
-        max_value, max_index = preds.max(-1)
-
-        outs = torch.cat([outs, max_index.unsqueeze(1)], -1)
-
-        eos_yet = eos_yet | (max_index == eosid)
-        if eos_yet.all():
+    for _ in range(max_len):
+        subseq_mask = make_subsequent_mask(outs.size(1)).to(src.device)
+        dec_out = model.decode(encodings, src_mask, outs, subseq_mask)
+        next_token = dec_out[:, -1].log_softmax(-1).argmax(-1)
+        outs = torch.cat([outs, next_token.unsqueeze(1)], dim=1)
+        finished |= next_token.eq(eosid)
+        if finished.all():
             break
+    # strip the initial <init>
     return outs[:, 1:]
 
 
-def beam_search(args, model, src, src_mask, initid, eosid, *objs):
-    # src_mask 1 1 T
-    obj_mask = objs[-2]
-    encoding, encoding_obj = model.encode(src, src_mask, *objs)
+def beam_search(
+    args,
+    model,
+    src: torch.Tensor,
+    src_mask: torch.Tensor,
+    initid: int,
+    eosid: int,
+    *objs,
+):
+    """Beam search that tolerates the absence of object features."""
 
-    _, T, H = encoding.size()
-    # print('eosid', eosid) #3
+    # ------------- Encode ----------------------------------------------------
+    enc_ret = model.encode(src, src_mask, *objs) if objs else model.encode(src, src_mask)
+    if isinstance(enc_ret, tuple):
+        encoding, encoding_obj = enc_ret
+    else:
+        encoding, encoding_obj = enc_ret, None
+
+    obj_mask = objs[-2] if len(objs) >= 2 else None
+
     W = args.beam_size
     alpha = args.alpha
-
+    _, T, H = encoding.size()
     max_len = int(T * args.length_ratio)
     min_len = T // 2
 
     prev_beam = Beam(W)
     prev_beam.candidates = [[initid]]
-    prev_beam.scores = [0]
-    f_done = (lambda x: x[-1] == eosid)
-    valid_size = W
-    hyp_list = []
+    prev_beam.scores = [0.0]
 
-    # all position first
-    allposition = model.addposition(encoding.new_zeros(1, max_len, H))
+    done_hyp, valid_size = [], W
+    is_done = lambda x: x[-1] == eosid
+
+    # Pre‑compute positional encodings once (helps a bit)
+    allpos = model.addposition(encoding.new_zeros(1, max_len, H))
     hiddens = encoding.new_zeros(1, max_len + 1, args.n_layers + 1, H)
+
     for t in range(max_len):
-        candidates = prev_beam.candidates
-        # B
-        input = src.new_tensor(list(map(lambda cand: cand[-1], candidates)))
-        # B H
-        hiddens[:, t, 0] = model.tgt_embed[0](input) + allposition[:, t]
+        inp_tokens = src.new_tensor([cand[-1] for cand in prev_beam.candidates])
+        hiddens[:, t, 0] = model.tgt_embed[0](inp_tokens) + allpos[:, t]
+
         for l in range(args.n_layers):
-            # B H
-            hiddens[:, t, l + 1] = model.decoder.layers[l].search(hiddens[:, t:t + 1, l], hiddens[:, :t + 1, l],
-                                                                      encoding, src_mask).view(-1, H)
-        # B V
-        log_prob = model.generate(hiddens[:, t, -1])
+            layer = model.decoder.layers[l]
+            hiddens[:, t, l + 1] = layer.search(
+                hiddens[:, t : t + 1, l], hiddens[:, : t + 1, l], encoding, src_mask
+            ).view(-1, H)
+
+        log_prob = model.generate(hiddens[:, t, -1])  # (B, V)
         if t < min_len:
-            log_prob[:, eosid] = -float('inf')
+            log_prob[:, eosid] = -float("inf")
         if t == max_len - 1:
-            eos_prob = log_prob[:, eosid].clone()
-            log_prob[:, :] = -float('inf')
-            log_prob[:, eosid] = eos_prob
+            eos_p = log_prob[:, eosid].clone()
+            log_prob.fill_(-float("inf"))
+            log_prob[:, eosid] = eos_p
 
         next_beam = Beam(valid_size)
-        done_list, remain_list = next_beam.step(-log_prob, prev_beam, f_done)
-        hyp_list.extend(done_list)
-        valid_size -= len(done_list)
-
+        step_done, remain_idx = next_beam.step(-log_prob, prev_beam, is_done)
+        done_hyp.extend(step_done)
+        valid_size -= len(step_done)
         if valid_size == 0:
             break
 
-        beam_remain_ix = src.new_tensor(remain_list)
-        encoding = encoding.index_select(0, beam_remain_ix)  # select batch dim
-        src_mask = src_mask.index_select(0, beam_remain_ix)
-
-        encoding_obj = encoding_obj.index_select(0, beam_remain_ix)
-        obj_mask = obj_mask.index_select(0, beam_remain_ix)
-
-        hiddens = hiddens.index_select(0, beam_remain_ix)
+        remain_idx = src.new_tensor(remain_idx)
+        encoding = encoding.index_select(0, remain_idx)
+        src_mask = src_mask.index_select(0, remain_idx)
+        if encoding_obj is not None:
+            encoding_obj = encoding_obj.index_select(0, remain_idx)
+        if obj_mask is not None:
+            obj_mask = obj_mask.index_select(0, remain_idx)
+        hiddens = hiddens.index_select(0, remain_idx)
         prev_beam = next_beam
 
-    score_list = [hyp[1] for hyp in hyp_list]
-    hyp_list = [hyp[0][1: hyp[0].index(eosid)] if eosid in hyp[0] else hyp[0][1:] for hyp in hyp_list]
+    # Length‑penalised sorting ------------------------------------------------
+    hyps, scores = zip(*done_hyp)
+    lp = torch.tensor([(5 + len(h)) / 6 for h in hyps], device=encoding.device) ** alpha
+    ranked = torch.argsort(torch.tensor(scores, device=encoding.device) / lp)
 
-    for k, (hyp, score) in enumerate(zip(hyp_list, score_list)):
-        if len(hyp) > 0:
-            lp = (5 + len(hyp)) / (5 + 1)
-            lp = lp ** alpha
-            score_list[k] = score_list[k] / lp
+    best_hyp = hyps[ranked[0]]
+    if eosid in best_hyp:
+        best_hyp = best_hyp[1 : best_hyp.index(eosid)]
+    else:
+        best_hyp = best_hyp[1:]
 
-    score = hiddens.new_tensor(score_list)
-    sort_score, sort_ix = torch.sort(score)
-    output = []
-    for ix in sort_ix.tolist():
-        output.append((hyp_list[ix], score[ix].item()))
-    # add batch dim
-    output = src.new_tensor([output[0][0]])
-    return output
+    return src.new_tensor([best_hyp])
