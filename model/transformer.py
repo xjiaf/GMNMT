@@ -146,6 +146,11 @@ def train(args, train_iter, dev, src, tgt, checkpoint):
     boxprobs    = pickle.load(open(args.boxprobs,   'rb'))
 
     start_time = time.time()
+    # ---------- 记录 epoch 信息 ----------
+    epoch_size      = len(train_iter)        # 一个 epoch 包含的 batch 数
+    epoch_start_t   = time.time()            # 本 epoch 起点
+    # ------------------------------------
+
     max_steps   = args.maximum_steps * args.delay
     topk = 5
     objdim = args.objdim
@@ -229,6 +234,16 @@ def train(args, train_iter, dev, src, tgt, checkpoint):
         t2 = time.time()
         print(f'{t2}: Iter {global_step:>6} | loss {loss.item()*args.delay:.4f} | '
               f'dt {(t2-t1):.2f}s | lr {opt._rate:.2e}')
+        # ----------- 统计并打印本 epoch 时间 -----------
+        if iters % epoch_size == 0:                    # 跑完一轮数据
+            epoch_idx  = (iters + offset) // epoch_size   # 全局第几个 epoch（含 resume）
+            epoch_time = time.time() - epoch_start_t
+            print(f'Epoch {epoch_idx:03d} finished | '
+                  f'time {epoch_time/60:.2f} min | '
+                  f'avg {epoch_time/epoch_size:.2f}s / batch')
+            epoch_start_t = time.time()                # 重新计时下一个 epoch
+        # ------------------------------------------------
+
 
         # eval & save
         if global_step % (args.eval_every * args.delay) == 0:

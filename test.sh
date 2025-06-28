@@ -1,5 +1,5 @@
 #!/bin/bash
-datapath=
+datapath=bpe_data
 
 modelname=${1}
 tgt=${2}
