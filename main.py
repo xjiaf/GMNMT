@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 from torchtext import data
-import logging
 import random
 import argparse
 
@@ -12,6 +11,12 @@ from model.transformer import train, decode
 from pathlib import Path
 import json
 
+import logging
+logging.basicConfig(
+    format='%(asctime)s | %(levelname)s | %(message)s',
+    level=logging.INFO,           # 保留现有 logging 级别即可
+    datefmt='%m-%d %H:%M:%S'      # 跟 curtime() 的输出风格一致
+)
 
 def dyn_batch_with_padding(new, i, sofar):
     prev_max_len = sofar / (i - 1) if i > 1 else 0

@@ -227,8 +227,8 @@ def train(args, train_iter, dev, src, tgt, checkpoint):
         opt.step()
 
         t2 = time.time()
-        print(f'Iter {global_step:>6} | loss {loss.item()*args.delay:.4f} | '
-              f'time {(t2-t1):.2f}s | lr {opt._rate:.2e}')
+        print(f'{t2}: Iter {global_step:>6} | loss {loss.item()*args.delay:.4f} | '
+              f'dt {(t2-t1):.2f}s | lr {opt._rate:.2e}')
 
         # eval & save
         if global_step % (args.eval_every * args.delay) == 0:
@@ -275,6 +275,7 @@ def valid_model(args, model, dev, src, tgt, allboxfeats, boxprobs, dev_metrics=N
     srcpadid = src.vocab.stoi['<pad>']
     f = open(args.writetrans, 'w', encoding='utf-8')
     dev.init_epoch()
+    decoding_times = []
 
     for j, dev_batch in enumerate(dev):
         sources, source_masks = prepare_sources(dev_batch.src, srcpadid, args.share_vocab)
@@ -307,15 +308,23 @@ def valid_model(args, model, dev, src, tgt, allboxfeats, boxprobs, dev_metrics=N
         # 把 obj_feat 拉平成 [B, max_regions*topk, objdim]
         obj_feat = obj_feat.view(sources.size(0), -1, objdim)
 
-        # 只传 src, tgt, 融合后的 memory, mask 给 decoder
+        start_t = time.time()
         if args.beam_size == 1:
-            translations_id = greedy(args, model,
-                                     sources, source_masks,
-                                     initid, eosid)
+            translations_id = greedy(
+                args, model,
+                sources, source_masks,
+                initid, eosid,
+                obj_feat, None, obj_mask, matrix        # ← 新增
+            )
         else:
-            translations_id = beam_search(args, model,
-                                          sources, source_masks,
-                                          initid, eosid)
+            translations_id = beam_search(
+                args, model,
+                sources, source_masks,
+                initid, eosid,
+                obj_feat, None, obj_mask, matrix        # ← 新增
+            )
+        
+        decoding_times.append(time.time() - start_t)
 
         translations = tgt.reverse(translations_id.detach(), unbpe=True)
         for trans in translations:
@@ -330,7 +339,10 @@ def valid_model(args, model, dev, src, tgt, allboxfeats, boxprobs, dev_metrics=N
     if len(bleu) == 0:
         print('bleu', bleuinfo)
         return 0
-    print('average decoding latency: {} ms'.format(int(np.mean(decoding_time) * 1000)))
+    if decoding_times:       # 防止空列表
+        avg_ms = 1000 * sum(decoding_times) / len(decoding_times)
+        print(f'average decoding latency: {avg_ms:.1f} ms')
+
     return float(bleu[0])
 
 
@@ -411,3 +423,9 @@ class EncoderDecoder(nn.Module):
         """
         return self.decoder(self.tgt_embed(tgt), memory, src_mask, tgt_mask)
 
+    def addposition(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        给输入张量加上 **目标侧** 的位置编码。
+        x 的形状 (B, T, H)；只用 tgt_embed 里的 PositionalEncoding。
+        """
+        return self.tgt_embed[1](x)   # self.tgt_embed = [Embeddings, PositionalEncoding]
