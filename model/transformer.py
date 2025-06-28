@@ -93,7 +93,7 @@ def transformer(args):
     dec_dp = args.dec_dp
     encoder = GATEncoder(d_model, d_hidden, n_heads, enc_dp, args.n_enclayers)
     tgt_emb_pos = nn.Sequential(Embeddings(d_model, trg_vocab), PositionalEncoding(d_model, input_dp))
-    decoder = Decoder(clone(DecoderLayer(d_model, n_heads, d_hidden, dec_dp), n_layers))
+    decoder = Decoder(DecoderLayer(d_model, n_heads, d_hidden, dec_dp), n_layers)
     generator = Generator(d_model, trg_vocab)
     model = EncoderDecoder(encoder, decoder, src_emb_pos, tgt_emb_pos, generator)
     if args.share_vocab:
