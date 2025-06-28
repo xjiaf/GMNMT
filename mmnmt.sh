@@ -1,7 +1,7 @@
 #!/bin/bash
-datapath=
+datapath=bpe_data
 tgt=de
-modelname=
+modelname=gmnmt_de
 gpu=$1
 CUDA_VISIBLE_DEVICES=$gpu python -u main.py --model ${modelname} \
 --corpus_prex $datapath/train.bpe --lang en $tgt graph \

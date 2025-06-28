@@ -196,14 +196,14 @@ if __name__ == '__main__':
             TRG.vocab = trg_vocab
             print('vocab {} loaded'.format(str(vocab_path)))
         else:
-            assert (not train_data is None)
+            assert train_data is not None
             if not args.share_vocab:
                 SRC.build_vocab(train_data, max_size=args.vocab_size)
             TRG.build_vocab(train_data, max_size=args.vocab_size)
+            print('save the vocabulary')
+            vocab_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save([SRC.vocab, TRG.vocab], str(vocab_path))
 
-			print('save the vocabulary')
-			vocab_path.parent.mkdir(parents=True, exist_ok=True)
-			torch.save([SRC.vocab, TRG.vocab], str(vocab_path))
 
         args.__dict__.update({'trg_vocab': len(TRG.vocab), 'src_vocab': len(SRC.vocab)})
 

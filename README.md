@@ -12,6 +12,7 @@ Source code for "A Novel Graph-based Multi-modal Fusion Encoder for Neural Machi
 conda create -n "gmnmt" python=3.6
 conda activate gmnmt
 conda install pytorch==1.2.0 torchvision==0.4.0 cudatoolkit=10.0 -c pytorch
+pip install torchtext==0.3.1
 
 pip install gdown
 gdown "https://drive.google.com/uc?export=download&id=1ihwtA99M3e1476N-cCWWaRYkI6Lpj1jL"

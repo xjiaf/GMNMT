@@ -55,33 +55,29 @@ class GATEncoder(nn.Module):
 
         for i in range(self.layer):
 			# Textual Self-attention, for text node
-			newx = self.res4mes_x[i](x, self.mhatt_x[i](x, x, x, mask))
+            newx = self.res4mes_x[i](x, self.mhatt_x[i](x, x, x, mask))
 
 			# Visual Self-attention, for image node
-			newo = self.res4mes_o[i](o, self.mhatt_o[i](o, o, o, obj_mask))
+            newo = self.res4mes_o[i](o, self.mhatt_o[i](o, o, o, obj_mask))
 
 			# Text to Image Gating
-			newx_ep = newx.unsqueeze(2).expand(batch, xn, objn, newx.size(-1))
-			o_ep = newo.unsqueeze(1).expand(batch, xn, objn, o.size(-1))
+            newx_ep = newx.unsqueeze(2).expand(batch, xn, objn, newx.size(-1))
+            o_ep = newo.unsqueeze(1).expand(batch, xn, objn, o.size(-1))
 			# B T O H
-			x2o_gates = torch.sigmoid(self.mhatt_x2o[i](torch.cat((newx_ep, o_ep), -1)))
-			x2o = (x2o_gates * matrix * o_ep).sum(2)
-
-			# Image to Text Gating
-			x_ep = newx.unsqueeze(1).expand(batch, objn, xn, newx.size(-1))
-			newo_ep = newo.unsqueeze(2).expand(batch, objn, xn, o.size(-1))
+            x2o_gates = torch.sigmoid(self.mhatt_x2o[i](torch.cat((newx_ep, o_ep), -1)))
+            x2o = (x2o_gates * matrix * o_ep).sum(2)
+            # Image to Text Gating
+            x_ep = newx.unsqueeze(1).expand(batch, objn, xn, newx.size(-1))
+            newo_ep = newo.unsqueeze(2).expand(batch, objn, xn, o.size(-1))
 			# B O T H
-			o2x_gates = torch.sigmoid(self.mhatt_o2x[i](torch.cat((x_ep, newo_ep), -1)))
-			o2x = (o2x_gates * matrix4obj * x_ep).sum(2)
-
-			newx = self.xgate[i](newx, x2o)
-			newo = self.ogate[i](newo, o2x)
-
-			# using ffn to update
-			x = self.res4ffn_x[i](newx, self.ffn_x[i](newx))
-			o = self.res4ffn_o[i](newo, self.ffn_o[i](newo))
-
-        return x, o
+            o2x_gates = torch.sigmoid(self.mhatt_o2x[i](torch.cat((x_ep, newo_ep), -1)))
+            o2x = (o2x_gates * matrix4obj * x_ep).sum(2)
+            newx = self.xgate[i](newx, x2o)
+            newo = self.ogate[i](newo, o2x)
+            # using ffn to update
+            x = self.res4ffn_x[i](newx, self.ffn_x[i](newx))
+            o = self.res4ffn_o[i](newo, self.ffn_o[i](newo))
+            return x, o
 
 def transformer(args):
     d_model = args.d_model
@@ -95,19 +91,15 @@ def transformer(args):
     src_emb_pos = nn.Sequential(Embeddings(d_model, src_vocab), PositionalEncoding(d_model, input_dp))
     enc_dp = args.enc_dp
     dec_dp = args.dec_dp
-
     encoder = GATEncoder(d_model, d_hidden, n_heads, enc_dp, args.n_enclayers)
     tgt_emb_pos = nn.Sequential(Embeddings(d_model, trg_vocab), PositionalEncoding(d_model, input_dp))
     decoder = Decoder(clone(DecoderLayer(d_model, n_heads, d_hidden, dec_dp), n_layers))
     generator = Generator(d_model, trg_vocab)
     model = EncoderDecoder(encoder, decoder, src_emb_pos, tgt_emb_pos, generator)
-
     if args.share_vocab:
         model.src_embed[0].lut.weight = model.tgt_embed[0].lut.weight
-
     if args.share_embed:
         model.generator.proj.weight = model.tgt_embed[0].lut.weight
-
     return model
 
 
@@ -118,26 +110,20 @@ def train(args, train_iter, dev, src, tgt, checkpoint):
     model = transformer(args)
     print(model)
     print_params(model)
-
     best_bleu = 0.0
     best_iter = 0
     offset = 0
-
     srcpadid = src.vocab.stoi['<pad>']
     tgtpadid = tgt.vocab.stoi['<pad>']
-
-
     if checkpoint is not None:
         print('model.load_state_dict(checkpoint[model])')
         model.load_state_dict(checkpoint['model'])
     model.cuda()
-
     if args.optimizer == 'Noam':
         adamopt = torch.optim.Adam(model.parameters(), betas=(0.9, 0.98), eps=1e-9)
         opt = NoamOpt(args.d_model, args.lr, args.warmup, adamopt, args.grad_clip, args.delay)
     else:
         raise NotImplementedError
-
     if args.resume:
         opt.optimizer.load_state_dict(checkpoint['optim'])
         offset = checkpoint['iters']
@@ -149,98 +135,69 @@ def train(args, train_iter, dev, src, tgt, checkpoint):
 
     #criterion = nn.NLLLoss(ignore_index=tgtpadid, reduction='sum')
     criterion = nn.KLDivLoss(reduction='sum')
-
     start = time.time()
-
     update_steps = args.maximum_steps
     maxsteps = update_steps * args.delay
-
     patience = args.patience
-    
     smoothing = 0.1
     confidence = 1.0 - smoothing
-
     smoothing_value = smoothing / (args.trg_vocab - 2)
     one_hot = torch.full((args.trg_vocab,), smoothing_value)
     one_hot[tgtpadid] = 0
     one_hot = one_hot.unsqueeze(0).cuda()
-    
     allboxfeats = pickle.load(open(args.boxfeat[0], 'rb'))
     valboxfeats = pickle.load(open(args.boxfeat[1], 'rb'))
-	
     boxprobs = pickle.load(open(args.boxprobs, 'rb'))
-	
     topk = 5
 	thre = 0.0
     objdim = args.objdim
-	
     for iters, train_batch in enumerate(train_iter):
         iters += offset
-
         if iters > maxsteps:
             print('reached the maximum updating steps.')
             break
-
         model.train()
-
         t1 = time.time()
-
         sources, source_masks = prepare_sources(train_batch.src, srcpadid, args.share_vocab)
         target_inputs, target_outputs, target_ipmasks, n_tokens = prepare_targets(train_batch.trg, tgtpadid)
-
         imgs, aligns, regions_num = train_batch.extra_0
-
         # B Tobj
         obj_feat = sources.new_zeros(sources.size(0), max(regions_num), topk, objdim).float()
         # B 1 Tobj*topk
         obj_mask = source_masks.new_zeros(sources.size(0), max(regions_num)*topk)
-        
         # B Tx Tobj*topk
         matrix = sources.new_zeros(sources.size(0), sources.size(1), max(regions_num)*topk).float()
-        
         for ib, img in enumerate(imgs):
             # phrase_num, 5, 2048 (numpy)
-            boxfeat = torch.tensor(allboxfeats[img]).reshape(-1, 5, objdim)
-            
+            boxfeat = torch.tensor(allboxfeats[img]).reshape(-1, 5, objdim)  
             # phrase_num * 5
             img_boxprobs = torch.tensor(boxprobs[img])
-            
             ge_thre = (img_boxprobs >= thre).byte()
             # keep top 1
             ge_thre[list(range(0, ge_thre.size(0), 5))] = 1
             obj_mask[ib, :ge_thre.size(0)] = ge_thre
             obj_feat[ib, :boxfeat.size(0)] = boxfeat[:, :topk]
-
             for item in aligns[ib]:
                 ## item: text_word_id, object_id
                 objixs = sources.new_tensor([n+item[1] * topk for n in range(topk)])
                 matrix[ib, item[0], objixs] = ge_thre[objixs].float().cuda()
-
         # batch_size, objectnum, objdim
         obj_feat = obj_feat.view(sources.size(0), -1, objdim)
         obj_mask = obj_mask.unsqueeze(1)
-
         outputs = model.forward(sources, target_inputs, source_masks, target_ipmasks,
                                 obj_feat, None, obj_mask, matrix)
-        
         truth_p = one_hot.repeat(target_outputs.size(0), target_outputs.size(1), 1)
         truth_p.scatter_(2, target_outputs.unsqueeze(2), confidence)
         truth_p.masked_fill_((target_outputs == tgtpadid).unsqueeze(2), 0)
         loss = criterion(outputs, truth_p)
-
         if torch.isnan(loss):
             exit('loss nan!!!!!!!!!')
-
         norm = n_tokens.float()
         loss = loss / norm
         loss = loss / args.delay
-
         loss.backward()
-
         opt.step()
-
         output_loss = loss.item() * args.delay
-
         # loss = 0
         t2 = time.time()
         print('iters:{} src:({},{}) tgt:({},{}) loss:{:.2f} t:{:.2f} lr:{:.1e}'.format(iters + 1, *sources.size(),
