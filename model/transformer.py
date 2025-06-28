@@ -30,13 +30,13 @@ class GATEncoder(nn.Module):
         self.ffn_x = clone(PositionwiseFeedForward(d_model, d_hidden), layer)
         self.res4ffn_x = clone(SublayerConnectionv2(d_model, dropout), layer)
         self.res4mes_x = clone(SublayerConnectionv2(d_model, dropout), layer)
-        
-		# img
+
+        # img
         self.mhatt_o = clone(MultiHeadedAttention(n_heads, d_model, dropout, v=0, output=0), layer)
         self.ffn_o = clone(PositionwiseFeedForward(d_model, d_hidden), layer)
         self.res4mes_o = clone(SublayerConnectionv2(d_model, dropout), layer)
         self.res4ffn_o = clone(SublayerConnectionv2(d_model, dropout), layer)
-		
+
         self.mhatt_x2o = clone(Linear(d_model * 2, d_model), layer)
         self.mhatt_o2x = clone(Linear(d_model * 2, d_model), layer)
         self.xgate = clone(SublayerConnectionv2(d_model, dropout), layer)
@@ -45,7 +45,7 @@ class GATEncoder(nn.Module):
     def forward(self, x, mask, *objs):
         #              B 1 O     B T O
         obj_feats, _, obj_mask, matrix = objs
-        
+
         o = self.trans_obj(obj_feats)
         matrix = matrix.unsqueeze(-1)
         # B O T
@@ -54,22 +54,22 @@ class GATEncoder(nn.Module):
         batch, objn, xn = matrix4obj.size(0), matrix4obj.size(1), matrix4obj.size(2)
 
         for i in range(self.layer):
-			# Textual Self-attention, for text node
+            # Textual Self-attention, for text node
             newx = self.res4mes_x[i](x, self.mhatt_x[i](x, x, x, mask))
 
-			# Visual Self-attention, for image node
+            # Visual Self-attention, for image node
             newo = self.res4mes_o[i](o, self.mhatt_o[i](o, o, o, obj_mask))
 
-			# Text to Image Gating
+            # Text to Image Gating
             newx_ep = newx.unsqueeze(2).expand(batch, xn, objn, newx.size(-1))
             o_ep = newo.unsqueeze(1).expand(batch, xn, objn, o.size(-1))
-			# B T O H
+            # B T O H
             x2o_gates = torch.sigmoid(self.mhatt_x2o[i](torch.cat((newx_ep, o_ep), -1)))
             x2o = (x2o_gates * matrix * o_ep).sum(2)
             # Image to Text Gating
             x_ep = newx.unsqueeze(1).expand(batch, objn, xn, newx.size(-1))
             newo_ep = newo.unsqueeze(2).expand(batch, objn, xn, o.size(-1))
-			# B O T H
+            # B O T H
             o2x_gates = torch.sigmoid(self.mhatt_o2x[i](torch.cat((x_ep, newo_ep), -1)))
             o2x = (o2x_gates * matrix4obj * x_ep).sum(2)
             newx = self.xgate[i](newx, x2o)
@@ -149,7 +149,7 @@ def train(args, train_iter, dev, src, tgt, checkpoint):
     valboxfeats = pickle.load(open(args.boxfeat[1], 'rb'))
     boxprobs = pickle.load(open(args.boxprobs, 'rb'))
     topk = 5
-	thre = 0.0
+    thre = 0.0
     objdim = args.objdim
     for iters, train_batch in enumerate(train_iter):
         iters += offset
@@ -169,7 +169,7 @@ def train(args, train_iter, dev, src, tgt, checkpoint):
         matrix = sources.new_zeros(sources.size(0), sources.size(1), max(regions_num)*topk).float()
         for ib, img in enumerate(imgs):
             # phrase_num, 5, 2048 (numpy)
-            boxfeat = torch.tensor(allboxfeats[img]).reshape(-1, 5, objdim)  
+            boxfeat = torch.tensor(allboxfeats[img]).reshape(-1, 5, objdim)
             # phrase_num * 5
             img_boxprobs = torch.tensor(boxprobs[img])
             ge_thre = (img_boxprobs >= thre).byte()
@@ -269,7 +269,7 @@ def valid_model(args, model, dev, src, tgt, allboxfeats, boxprobs, dev_metrics=N
         print('beam search with beam', args.beam_size)
 
     decoding_time = []
-    
+
     topk = 5
     objdim = args.objdim
     thre = 0
@@ -279,12 +279,12 @@ def valid_model(args, model, dev, src, tgt, allboxfeats, boxprobs, dev_metrics=N
         t1 = time.time()
 
         imgs, aligns, regions_num = dev_batch.extra_0
-        
+
         # B Tobj
         obj_feat = sources.new_zeros(sources.size(0), max(regions_num), topk, objdim).float()
         # B 1 Tobj*topk
         obj_mask = source_masks.new_zeros(sources.size(0), max(regions_num)*topk)
-        
+
         # B Tx Tobj*topk
         matrix = sources.new_zeros(sources.size(0), sources.size(1), max(regions_num)*topk).float()
         for ib, img in enumerate(imgs):
@@ -301,11 +301,11 @@ def valid_model(args, model, dev, src, tgt, allboxfeats, boxprobs, dev_metrics=N
             for item in aligns[ib]:
                 objixs = sources.new_tensor([n+item[1] * topk for n in range(topk)])
                 matrix[ib, item[0], objixs] = ge_thre[objixs].float().cuda()
-        
+
         obj_feat = obj_feat.view(sources.size(0), -1, objdim)
         obj_mask = obj_mask.unsqueeze(1)
-        
-        
+
+
         if args.beam_size == 1:
             translations_id = greedy(args, model, sources, source_masks, initid, eosid)
         else:
@@ -373,4 +373,3 @@ class EncoderDecoder(nn.Module):
 
     def addposition(self, x):
         return self.tgt_embed[1](x)
-
